@@ -2,6 +2,7 @@ package io.helidon.metadata.app;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
@@ -14,6 +15,7 @@ import java.util.Deque;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.Predicate;
 import java.util.jar.Manifest;
@@ -22,10 +24,9 @@ import java.util.stream.Stream;
 public class Main {
 
     public static void main(String[] args) throws IOException, URISyntaxException {
-        System.out.println("Main started");
-        if (isFlattened()) {
-            System.out.println("fat-jar detected!!");
-        }
+        System.out.println("## Helidon Metadata App\n");
+        System.out.println("Flattened: " + isFlattened() + "\n");
+        System.out.println("### Discovered resources\n");
         Set<String> resources = resources(p -> p.startsWith("/META-INF/helidon"));
         resources.forEach(System.out::println);
     }
@@ -42,23 +43,23 @@ public class Main {
                 paths.add(Path.of(e).toAbsolutePath().normalize());
             }
         }
-        Set<String> resources = new HashSet<>();
+        Set<String> result = new HashSet<>();
         Deque<Path> stack = new ArrayDeque<>(paths);
         while (!stack.isEmpty()) {
             Path path = stack.pop();
             if (Files.isDirectory(path)) {
-                resources.addAll(resources(path, predicate));
-            } else if (path.getFileName().toString().endsWith(".jar")) {
+                result.addAll(resources(path, predicate));
+            } else if (isZipFile(path)) {
                 try (var fs = zipFileSystem(path)) {
                     for (Path root : fs.getRootDirectories()) {
-                        resources.addAll(resources(root, predicate));
+                        result.addAll(resources(root, predicate));
                         Path mf = root.resolve("META-INF/MANIFEST.MF");
                         if (Files.exists(mf)) {
                             Manifest manifest = new Manifest(Files.newInputStream(mf));
                             String cp = manifest.getMainAttributes().getValue("Class-Path");
                             if (cp != null) {
                                 Path parent = path.getParent();
-                                for (String e : manifest.getMainAttributes().getValue("Class-Path").split(" ")) {
+                                for (String e : cp.split("\\s")) {
                                     if (!e.isEmpty()) {
                                         Path path0 = parent.resolve(e).toAbsolutePath().normalize();
                                         if (paths.add(path0)) {
@@ -72,14 +73,14 @@ public class Main {
                 }
             }
         }
-        return resources;
+        return result;
     }
 
     static List<String> resources(Path path, Predicate<Path> predicate) throws IOException {
         try (Stream<Path> stream = Files.walk(path)) {
             return stream.filter(p -> !Files.isDirectory(p))
                     .filter(predicate)
-                    .map(Path::toString)
+                    .map(Path::toString) // TODO relativize
                     .toList();
         }
     }
@@ -93,24 +94,28 @@ public class Main {
         return FileSystems.newFileSystem(uri, Map.of());
     }
 
-    static String jarPath(URI uri) {
-        String spec = uri.getSchemeSpecificPart();
-        int index = spec.indexOf("!/");
-        if (index == -1) {
-            return spec;
+    static boolean isZipFile(Path file) throws IOException {
+        try (InputStream is = Files.newInputStream(file)) {
+            return is.read() == 0x50 && is.read() == 0x4b; // magic number
         }
-        return spec.substring(0, index);
     }
 
     static boolean isFlattened() throws URISyntaxException {
-        ClassLoader cl = ClassLoader.getSystemClassLoader();
-        URL one = cl.getResource("META-INF/helidon/io.helidon.metadata/module1/file.json");
-        URL two = cl.getResource("META-INF/helidon/io.helidon.metadata/module2/file.json");
-        if (one != null && two != null) {
-            return jarPath(one.toURI()).equals(jarPath(two.toURI()));
-        } else {
-            System.err.println("Cannot detect flattening");
-            return false;
+        return Objects.equals(
+                entry("META-INF/helidon/io.helidon.metadata/module1/file.json"),
+                entry("META-INF/helidon/io.helidon.metadata/module2/file.json"));
+    }
+
+    static String entry(String path) throws URISyntaxException {
+        URL url = ClassLoader.getSystemClassLoader().getResource(path);
+        String entry = null;
+        if (url != null) {
+            String spec = url.toURI().getSchemeSpecificPart();
+            entry = spec.substring(0, spec.length() - (path.length() + 1));
+            if (entry.charAt(entry.length() - 1) == '!') {
+                entry = entry.substring(0, entry.length() - 1);
+            }
         }
+        return entry;
     }
 }
