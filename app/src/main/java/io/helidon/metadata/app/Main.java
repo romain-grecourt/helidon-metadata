@@ -8,18 +8,18 @@ import java.net.URISyntaxException;
 import java.net.URL;
 import java.nio.file.FileSystem;
 import java.nio.file.FileSystems;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.function.Predicate;
 import java.util.jar.Manifest;
-import java.util.stream.Stream;
 
 public class Main {
 
@@ -27,11 +27,11 @@ public class Main {
         System.out.println("## Helidon Metadata App\n");
         System.out.println("Flattened: " + isFlattened() + "\n");
         System.out.println("### Discovered resources\n");
-        Set<String> resources = resources(p -> p.startsWith("/META-INF/helidon"));
+        Set<String> resources = scan();
         resources.forEach(System.out::println);
     }
 
-    static Set<String> resources(Predicate<Path> predicate) throws IOException {
+    static Set<String> scan() throws IOException {
         Set<Path> paths = new HashSet<>();
         for (String e : System.getProperty("java.class.path", "").split(File.pathSeparator)) {
             if (!e.isEmpty()) {
@@ -48,11 +48,11 @@ public class Main {
         while (!stack.isEmpty()) {
             Path path = stack.pop();
             if (Files.isDirectory(path)) {
-                result.addAll(resources(path, predicate));
-            } else if (isZipFile(path)) {
-                try (var fs = zipFileSystem(path)) {
+                Files.walkFileTree(path, new FileVisitor(path, result));
+            } else if (isJarFile(path)) {
+                try (var fs = jarFileSystem(path)) {
                     for (Path root : fs.getRootDirectories()) {
-                        result.addAll(resources(root, predicate));
+                        Files.walkFileTree(root, new FileVisitor(root, result));
                         Path mf = root.resolve("META-INF/MANIFEST.MF");
                         if (Files.exists(mf)) {
                             Manifest manifest = new Manifest(Files.newInputStream(mf));
@@ -76,16 +76,7 @@ public class Main {
         return result;
     }
 
-    static List<String> resources(Path path, Predicate<Path> predicate) throws IOException {
-        try (Stream<Path> stream = Files.walk(path)) {
-            return stream.filter(p -> !Files.isDirectory(p))
-                    .filter(predicate)
-                    .map(Path::toString) // TODO relativize
-                    .toList();
-        }
-    }
-
-    static FileSystem zipFileSystem(Path path) throws IOException {
+    static FileSystem jarFileSystem(Path path) throws IOException {
         String uriPrefix = "jar:file:";
         if (File.pathSeparatorChar != ':') { // windows
             uriPrefix += "/";
@@ -94,7 +85,7 @@ public class Main {
         return FileSystems.newFileSystem(uri, Map.of());
     }
 
-    static boolean isZipFile(Path file) throws IOException {
+    static boolean isJarFile(Path file) throws IOException {
         try (InputStream is = Files.newInputStream(file)) {
             return is.read() == 0x50 && is.read() == 0x4b; // magic number
         }
@@ -117,5 +108,33 @@ public class Main {
             }
         }
         return entry;
+    }
+
+    static class FileVisitor extends SimpleFileVisitor<Path> {
+
+        private final Path metaDir;
+        private final Set<String> paths;
+
+        FileVisitor(Path root, Set<String> paths) {
+            this.metaDir = root.resolve("META-INF/helidon");
+            this.paths = paths;
+        }
+
+        @Override
+        public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+            if (metaDir.startsWith(dir) || dir.startsWith(metaDir)) {
+                return FileVisitResult.CONTINUE;
+            } else {
+                return FileVisitResult.SKIP_SUBTREE;
+            }
+        }
+
+        @Override
+        public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+            if (file.startsWith(metaDir)) {
+                paths.add(file.toString());
+            }
+            return FileVisitResult.CONTINUE;
+        }
     }
 }
